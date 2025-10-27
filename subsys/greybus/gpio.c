@@ -323,7 +323,7 @@ static void gpio_callback_handler(const struct device *port, struct gpio_callbac
 	}
 }
 
-static int gb_gpio_init(const void *priv, uint16_t cport)
+static void gb_gpio_connected(const void *priv, uint16_t cport)
 {
 	int ret;
 	struct gb_gpio_driver_data *data = (struct gb_gpio_driver_data *)priv;
@@ -335,13 +335,10 @@ static int gb_gpio_init(const void *priv, uint16_t cport)
 	ret = gpio_add_callback(data->dev, &data->cb);
 	if (ret < 0) {
 		LOG_ERR("Failed to add gpio callback");
-		return ret;
 	}
-
-	return 0;
 }
 
-static void gb_gpio_exit(const void *priv)
+static void gb_gpio_disconnected(const void *priv)
 {
 	struct gb_gpio_driver_data *data = (struct gb_gpio_driver_data *)priv;
 
@@ -349,7 +346,7 @@ static void gb_gpio_exit(const void *priv)
 }
 
 struct gb_driver gb_gpio_driver = {
-	.init = gb_gpio_init,
-	.exit = gb_gpio_exit,
+	.connected = gb_gpio_connected,
+	.disconnected = gb_gpio_disconnected,
 	.op_handler = gb_gpio_handler,
 };

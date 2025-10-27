@@ -24,22 +24,10 @@ ZTEST(greybus_gpio_tests, test_cport_count)
 	zassert_equal(GREYBUS_CPORT_COUNT, 2, "Invalid number of cports");
 }
 
-static struct gb_msg_with_cport get_first_non_event(void)
-{
-	struct gb_msg_with_cport msg = gb_transport_get_message();
-
-	while (gb_message_type(msg.msg) == GB_GPIO_TYPE_IRQ_EVENT) {
-		gb_message_dealloc(msg.msg);
-		msg = gb_transport_get_message();
-	}
-
-	return msg;
-}
-
 /* Returns msg after some common checks */
 static struct gb_msg_with_cport get_first_non_event_checked(uint8_t type, uint16_t payload_len)
 {
-	struct gb_msg_with_cport msg = get_first_non_event();
+	struct gb_msg_with_cport msg = gb_transport_get_message();
 
 	/* Peform some common checks */
 	zassert_equal(msg.cport, 1, "Invalid cport");

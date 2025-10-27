@@ -41,6 +41,20 @@ LOG_MODULE_REGISTER(greybus_uart, CONFIG_GREYBUS_LOG_LEVEL);
 #define GB_UART_EVENT_PROTOCOL_ERROR 1
 #define GB_UART_EVENT_DEVICE_ERROR   2
 
+static void gb_uart_receive_credits(uint16_t cport, uint16_t count)
+{
+	struct gb_uart_receive_credits_request *req_data;
+	struct gb_message *msg =
+		gb_message_request_alloc(sizeof(*req_data), GB_UART_TYPE_RECEIVE_CREDITS, true);
+
+	req_data = (struct gb_uart_receive_credits_request *)msg->payload;
+
+	req_data->count = sys_cpu_to_le16(count);
+
+	gb_transport_message_send(msg, cport);
+	gb_message_dealloc(msg);
+}
+
 /**
  * @brief Protocol send data function.
  */
@@ -50,11 +64,16 @@ static void gb_uart_send_data(uint16_t cport, struct gb_message *req, const stru
 	const struct gb_uart_send_data_request *req_data =
 		(const struct gb_uart_send_data_request *)req->payload;
 
+	/* Success response does not signify that writing is done. So can be sent early */
+	gb_transport_message_empty_response_send_no_free(req, GB_OP_SUCCESS, cport);
+
 	for (i = 0; i < sys_le16_to_cpu(req_data->size); i++) {
 		uart_poll_out(dev, req_data->data[i]);
 	}
 
-	gb_transport_message_empty_response_send(req, GB_OP_SUCCESS, cport);
+	/* Send request to signal the number of bytes written */
+	gb_uart_receive_credits(cport, sys_le16_to_cpu(req_data->size));
+	gb_message_dealloc(req);
 }
 
 /**
@@ -181,7 +200,7 @@ static void uart_irq_cb(const struct device *dev, void *user_data)
 		return;
 	}
 
-	req = gb_message_request_alloc(MAX_RX_BUF_SIZE, GB_UART_TYPE_RECEIVE_DATA, false);
+	req = gb_message_request_alloc(MAX_RX_BUF_SIZE, GB_UART_TYPE_RECEIVE_DATA, true);
 	if (!req) {
 		LOG_ERR("Failed to allocate message");
 		return;
@@ -199,38 +218,12 @@ static void uart_irq_cb(const struct device *dev, void *user_data)
 	req->header.size =
 		ret + sizeof(struct gb_message) + sizeof(struct gb_uart_recv_data_request);
 
-	gb_transport_message_send(req, cport);
+	if (ret) {
+		gb_transport_message_send(req, cport);
+	}
 
 free_msg:
 	gb_message_dealloc(req);
-}
-
-/**
- * @brief Protocol initialization function.
- *
- * This function perform the protocto initialization function, such as open
- * the cooperation device driver, launch threads, create buffers etc.
- */
-static int gb_uart_init(const void *priv, uint16_t cport)
-{
-	const struct device *dev = priv;
-
-	uart_irq_callback_user_data_set(dev, uart_irq_cb, UINT_TO_POINTER(cport));
-	uart_irq_rx_enable(dev);
-
-	return 0;
-}
-
-/**
- * @brief Protocol exit function.
- *
- * This function can be called when protocol terminated.
- */
-static void gb_uart_exit(const void *priv)
-{
-	const struct device *dev = priv;
-
-	uart_irq_rx_disable(dev);
 }
 
 static void gb_uart_handler(const void *priv, struct gb_message *msg, uint16_t cport)
@@ -246,14 +239,33 @@ static void gb_uart_handler(const void *priv, struct gb_message *msg, uint16_t c
 		return gb_uart_set_control_line_state(cport, msg, dev);
 	case GB_UART_TYPE_SEND_BREAK:
 		return gb_uart_send_break(cport, msg, dev);
+	case GB_UART_TYPE_FLUSH_FIFOS:
+		/* Since I am not doing any internal buffering, this is not implemented. */
+		return gb_transport_message_empty_response_send(msg, GB_OP_SUCCESS, cport);
 	default:
 		LOG_ERR("Invalid type");
 		return gb_transport_message_empty_response_send(msg, GB_OP_PROTOCOL_BAD, cport);
 	}
 }
 
+static void gb_uart_connected(const void *priv, uint16_t cport)
+{
+	const struct device *dev = priv;
+
+	uart_irq_callback_user_data_set(dev, uart_irq_cb, UINT_TO_POINTER(cport));
+	uart_irq_rx_enable(dev);
+}
+
+static void gb_uart_disconnected(const void *priv)
+{
+
+	const struct device *dev = priv;
+
+	uart_irq_rx_disable(dev);
+}
+
 struct gb_driver gb_uart_driver = {
-	.init = gb_uart_init,
-	.exit = gb_uart_exit,
 	.op_handler = gb_uart_handler,
+	.connected = gb_uart_connected,
+	.disconnected = gb_uart_disconnected,
 };

@@ -50,13 +50,11 @@ static inline void gb_transport_message_response_success_send(struct gb_message 
 /**
  * Helper to allocate and send a message with no payload.
  *
- * NOTE: This will dealloc request message.
- *
  * @param req Request message
  * @param status Response status
  */
-static inline void gb_transport_message_empty_response_send(struct gb_message *req, uint8_t status,
-							    uint16_t cport)
+static inline void gb_transport_message_empty_response_send_no_free(const struct gb_message *req,
+								    uint8_t status, uint16_t cport)
 {
 	/* No point in allocating empty messages on heap. */
 	const struct gb_message resp = {
@@ -71,6 +69,20 @@ static inline void gb_transport_message_empty_response_send(struct gb_message *r
 	};
 
 	gb_transport_message_send(&resp, cport);
+}
+
+/**
+ * Helper to allocate and send a message with no payload.
+ *
+ * NOTE: This will dealloc request message.
+ *
+ * @param req Request message
+ * @param status Response status
+ */
+static inline void gb_transport_message_empty_response_send(struct gb_message *req, uint8_t status,
+							    uint16_t cport)
+{
+	gb_transport_message_empty_response_send_no_free(req, status, cport);
 	gb_message_dealloc(req);
 }
 

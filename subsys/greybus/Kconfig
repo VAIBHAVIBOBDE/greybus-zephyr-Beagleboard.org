@@ -183,7 +183,6 @@ config GREYBUS_LOOPBACK
 
 config GREYBUS_LOG_BACKEND
 	bool "Greybus Log"
-	depends on LOG
 	help
 	  Select this for Greybus log support.
 
@@ -237,6 +236,21 @@ config GREYBUS_FW
 	depends on STREAM_FLASH
 	help
 	  Select this for greybus firmware management and download support.
+
+config GREYBUS_RAW
+	bool "Greybus Raw Protocol Support"
+	help
+	  Select this for greybus raw protocol support.
+
+if GREYBUS_RAW
+
+config GREYBUS_RAW_CPORTS
+	int "Number of Greybus Raw Protocol Cports"
+	default 1
+	help
+	  The number of raw protocol cports that will be allocated.
+
+endif # GREYBUS_RAW
 
 config GREYBUS_SERVICE_INIT_PRIORITY
 	int "default Greybus Service Init Priority"

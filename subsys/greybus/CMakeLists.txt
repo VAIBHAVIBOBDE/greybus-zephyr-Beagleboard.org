@@ -6,7 +6,6 @@ zephyr_library()
 
 zephyr_library_sources(
   greybus_messages.c
-  greybus_transport.c
   greybus_heap.c
   platform/certificate.c
 )
@@ -14,6 +13,7 @@ zephyr_library_sources(
 # Node-specific files
 zephyr_library_sources_ifdef(
 	CONFIG_GREYBUS_NODE
+	greybus_transport.c
 	greybus-core.c
 	control-gpb.c
 	platform/manifest.c

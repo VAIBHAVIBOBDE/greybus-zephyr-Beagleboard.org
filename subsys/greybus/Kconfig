@@ -11,17 +11,19 @@ menuconfig GREYBUS
 
 if GREYBUS
 
+config GREYBUS_HEAP_MEM_POOL_SIZE
+	int "Heap for Greybus subsystem"
+	default 2048
+	help
+	  Heap memory pre-allocated for greybus subsystem
+
 config GREYBUS_NODE
 	bool "Enable greybus node support"
 	default y
 	help
 	  This option enables functionality to act as Greybus node.
 
-config GREYBUS_HEAP_MEM_POOL_SIZE
-	int "Heap for Greybus subsystem"
-	default 2048
-	help
-	  Heap memory pre-allocated for greybus subsystem
+if GREYBUS_NODE
 
 choice
 	prompt "Which transport shall be used for Greybus?"
@@ -41,8 +43,6 @@ config GREYBUS_XPORT_DUMMY
 	  This is intended for testing and tracking base greybus subsystem size.
 
 endchoice
-
-if GREYBUS_NODE
 
 config GREYBUS_VENDOR_STRING
 	string "Greybus Vendor String"

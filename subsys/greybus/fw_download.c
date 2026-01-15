@@ -89,7 +89,7 @@ static void gb_fw_release_firmware(uint16_t cport, u8 firmware_id)
 	gb_message_dealloc(req);
 }
 
-static void gb_fw_donwnload_early_fail(uint16_t cport, u8 firmware_id, uint8_t req_id)
+static void gb_fw_download_early_fail(uint16_t cport, u8 firmware_id, uint8_t req_id)
 {
 	gb_fw_release_firmware(cport, firmware_id);
 	gb_fw_mgmt_interface_fw_loaded(req_id, GB_FW_LOAD_STATUS_FAILED, 0, 0);
@@ -141,7 +141,7 @@ static void gb_fw_download_fetch_firmware_response_handler(uint16_t cport, struc
 				       is_final_write);
 	if (ret < 0) {
 		LOG_ERR("Failed to write firmware to flash: %d", ret);
-		gb_fw_donwnload_early_fail(cport, priv_data.fw_id, priv_data.fw_size);
+		gb_fw_download_early_fail(cport, priv_data.fw_id, priv_data.fw_size);
 		return gb_message_dealloc(resp);
 	}
 

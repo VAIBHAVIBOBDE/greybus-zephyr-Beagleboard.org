@@ -14,7 +14,7 @@ LOG_MODULE_REGISTER(greybus_service, CONFIG_GREYBUS_LOG_LEVEL);
 
 #include "certificate.h"
 
-static int greybus_service_init(void)
+int greybus_service_init(void)
 {
 	int r;
 	const struct gb_transport_backend *xport = gb_transport_get_backend();
@@ -34,14 +34,13 @@ static int greybus_service_init(void)
 	r = gb_init(xport);
 	if (r < 0) {
 		LOG_ERR("gb_init() failed: %d", r);
-		goto clear_mnfb;
+		return r;
 	}
 
 	LOG_INF("Greybus is active");
 	return 0;
-
-clear_mnfb:
-	return r;
 }
 
+#ifdef CONFIG_GREYBUS_SERVICE
 SYS_INIT(greybus_service_init, APPLICATION, CONFIG_GREYBUS_SERVICE_INIT_PRIORITY);
+#endif // CONFIG_GREYBUS_SERVICE

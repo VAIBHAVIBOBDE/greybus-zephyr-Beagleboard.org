@@ -20,13 +20,6 @@ int gb_svc_init(void);
 void gb_svc_deinit(void);
 
 /**
- * Create SVC_TYPE_VERSION greybus message and queue it for sending.
- *
- * @return 0 if successful, else error.
- */
-int gb_svc_send_version(void);
-
-/**
  * Send the SVC module inserted request.
  *
  * @param primary_intf_id: Primary interface id of the new module

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Ayush Singh BeagleBoard.org
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef _GREYBUS_SERVICE_H_
 #define _GREYBUS_SERVICE_H_
 

@@ -7,7 +7,7 @@
 #ifndef _GREYBUS_SVC_H_
 #define _GREYBUS_SVC_H_
 
-#include "greybus_messages.h"
+#include <stdint.h>
 
 /**
  * Intialize SVC

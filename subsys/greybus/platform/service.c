@@ -9,6 +9,7 @@
 #include <greybus-utils/manifest.h>
 #include "../greybus_transport.h"
 #include <zephyr/logging/log.h>
+#include "../greybus_internal.h"
 
 LOG_MODULE_REGISTER(greybus_service, CONFIG_GREYBUS_LOG_LEVEL);
 

@@ -1,0 +1,19 @@
+description: Test SDHC Stub Driver
+
+compatible: "test,sdhc-stub"
+
+include: base.yaml
+
+properties:
+  max-bus-freq:
+    type: int
+    required: true
+    description: Maximum bus frequency
+  min-bus-freq:
+    type: int
+    required: true
+    description: Minimum bus frequency
+  bus-width:
+    type: int
+    required: true
+    description: Bus width

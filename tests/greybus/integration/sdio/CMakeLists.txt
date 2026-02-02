@@ -8,3 +8,8 @@ target_sources(app PRIVATE src/main.c)
 
 # GREYBUS_SDIO requires generic GREYBUS support
 target_include_directories(app PRIVATE ${ZEPHYR_BASE}/include)
+
+if("${BOARD}" STREQUAL "native_sim")
+  target_sources(app PRIVATE src/sdhc_stub.c)
+  list(APPEND DTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/dts)
+endif()

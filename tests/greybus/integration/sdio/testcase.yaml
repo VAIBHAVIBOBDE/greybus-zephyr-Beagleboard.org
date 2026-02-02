@@ -2,6 +2,9 @@ common:
   tags: greybus sdio
 tests:
   greybus.integration.sdio:
-    platform_allow: beagleconnect_freedom
+    platform_allow:
+      - beagleconnect_freedom
+      - native_sim
     integration_platforms:
       - beagleconnect_freedom
+      - native_sim

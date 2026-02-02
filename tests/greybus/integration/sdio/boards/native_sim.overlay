@@ -1,0 +1,9 @@
+/ {
+	sdhc0: sdhc0 {
+		compatible = "test,sdhc-stub";
+		status = "okay";
+		max-bus-freq = <200000000>;
+		min-bus-freq = <400000>;
+		bus-width = <4>;
+	};
+};

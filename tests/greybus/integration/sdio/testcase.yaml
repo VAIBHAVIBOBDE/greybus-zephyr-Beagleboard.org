@@ -1,0 +1,7 @@
+common:
+  tags: greybus sdio
+tests:
+  greybus.integration.sdio:
+    platform_allow: beagleconnect_freedom
+    integration_platforms:
+      - beagleconnect_freedom

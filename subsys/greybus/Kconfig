@@ -310,5 +310,6 @@ endif # GREYBUS_NODE
 module = GREYBUS
 module-str = Greybus
 source "subsys/logging/Kconfig.template.log_config"
+source "subsys/greybus/Kconfig.sdio"
 
 endif # GREYBUS

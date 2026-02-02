@@ -1,46 +1,23 @@
 /*
  * Copyright (c) 2015 Google, Inc.
+ * Copyright (c) 2024 BeagleBoard.org
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its
- * contributors may be used to endorse or promote products derived from this
- * software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
- * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include <zephyr/kernel.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 
-#include <config.h>
 #include <zephyr/device.h>
-#include <zephyr/device_sdio.h>
+#include <zephyr/drivers/sdhc.h>
 #include <greybus/greybus.h>
-
 #include <zephyr/sys/byteorder.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(greybus_sdio, CONFIG_GREYBUS_LOG_LEVEL);
-
-#include "sdio-gb.h"
 
 #define GB_SDIO_VERSION_MAJOR 0
 #define GB_SDIO_VERSION_MINOR 1
@@ -49,23 +26,13 @@ LOG_MODULE_REGISTER(greybus_sdio, CONFIG_GREYBUS_LOG_LEVEL);
 #define MAX_BLOCK_SIZE_1 1024
 #define MAX_BLOCK_SIZE_2 2048
 
-/**
- * SDIO protocol private information.
- */
 struct gb_sdio_info {
-	/** CPort from greybus */
 	unsigned int cport;
+	const struct device *sdhc_dev;
+	struct sdhc_command deferred_cmd;
+	bool has_deferred_cmd;
 };
 
-/**
- * @brief Return the max block length value in scale
- *
- * The Max Block Length only allows 512, 1024 and 2048. If the value is under
- * 512, it returns 0, the caller need to hanlder this error.
- *
- * @param value The data size to scale.
- * @return The scaled max block length.
- */
 static uint16_t scale_max_sd_block_length(uint16_t value)
 {
 	if (value < MAX_BLOCK_SIZE_0) {
@@ -78,48 +45,9 @@ static uint16_t scale_max_sd_block_length(uint16_t value)
 	return MAX_BLOCK_SIZE_2;
 }
 
-/**
- * @brief Event callback function for SDIO host controller driver
- *
- * @param data Pointer to gb_sdio_info.
- * @param event Event type.
- * @return 0 on success, negative errno on error.
- */
-static int event_callback(void *data, uint8_t event)
-{
-	struct gb_operation *operation;
-	struct gb_sdio_event_request *request;
-	struct gb_sdio_info *info;
-
-	DEBUGASSERT(data);
-	info = data;
-
-	operation = gb_operation_create(info->cport, GB_SDIO_TYPE_EVENT, sizeof(*request));
-	if (!operation) {
-		return -ENOMEM;
-	}
-
-	request = gb_operation_get_request_payload(operation);
-	request->event = event;
-
-	gb_operation_send_request_nowait(operation, false);
-	gb_operation_destroy(operation);
-
-	return 0;
-}
-
-/**
- * @brief Protocol get version function.
- *
- * Returns the major and minor Greybus SDIO protocol version number
- * supported by the SDIO.
- *
- * @param operation The pointer to structure of Greybus operation message
- * @return GB_OP_SUCCESS on success, error code on failure.
- */
 static uint8_t gb_sdio_protocol_version(struct gb_operation *operation)
 {
-	struct gb_sdio_proto_version_response *response = NULL;
+	struct gb_sdio_proto_version_response *response;
 
 	response = gb_operation_alloc_response(operation, sizeof(*response));
 	if (!response) {
@@ -132,27 +60,20 @@ static uint8_t gb_sdio_protocol_version(struct gb_operation *operation)
 	return GB_OP_SUCCESS;
 }
 
-/**
- * @brief Protocol gets capabilities of the SDIO host controller.
- *
- * Protocol to get the capabilities of SDIO host controller such as support bus
- * width, VDD value and clock.
- *
- * @param operation Pointer to structure of Greybus operation.
- * @return GB_OP_SUCCESS on success, error code on failure.
- */
 static uint8_t gb_sdio_protocol_get_capabilities(struct gb_operation *operation)
 {
-	struct gb_sdio_get_capabilities_response *response;
+	struct gb_sdio_get_caps_response *response;
 	struct gb_bundle *bundle;
-	struct sdio_cap cap;
+	struct gb_sdio_info *info;
+	struct sdhc_host_props props = {0};
 	uint16_t max_data_size;
+	uint32_t caps = 0;
 	int ret;
 
 	bundle = gb_operation_get_bundle(operation);
-	DEBUGASSERT(bundle);
+	info = bundle->priv;
 
-	ret = device_sdio_get_capabilities(bundle->dev, &cap);
+	ret = sdhc_get_host_props(info->sdhc_dev, &props);
 	if (ret) {
 		return gb_errno_to_op_result(ret);
 	}
@@ -162,50 +83,40 @@ static uint8_t gb_sdio_protocol_get_capabilities(struct gb_operation *operation)
 		return GB_OP_NO_MEMORY;
 	}
 
-	/*
-	 * The host Greybus uses max_blk_count * max_blk_size to request data,
-	 * we must restrict the size under max protocol response package size.
-	 */
 	max_data_size = GB_MAX_PAYLOAD_SIZE - sizeof(struct gb_sdio_transfer_response);
 	max_data_size = scale_max_sd_block_length(max_data_size);
 	if (!max_data_size) {
 		return GB_OP_INVALID;
 	}
-	if (cap.max_blk_count * cap.max_blk_size > max_data_size) {
-		if (cap.max_blk_size > max_data_size) {
-			cap.max_blk_size = max_data_size;
-		} else {
-			cap.max_blk_count = max_data_size / cap.max_blk_size;
-		}
-	}
 
-	response->caps = sys_cpu_to_le32(cap.caps);
-	response->ocr = sys_cpu_to_le32(cap.ocr);
-	response->f_min = sys_cpu_to_le32(cap.f_min);
-	response->f_max = sys_cpu_to_le32(cap.f_max);
-	response->max_blk_count = sys_cpu_to_le16(cap.max_blk_count);
-	response->max_blk_size = sys_cpu_to_le16(cap.max_blk_size);
+	/* Map Zephyr Caps to Greybus Caps - Best Effort */
+	if (props.host_caps.bus_4_bit_support) caps |= GB_SDIO_CAP_4_BIT_DATA;
+	if (props.host_caps.bus_8_bit_support) caps |= GB_SDIO_CAP_8_BIT_DATA;
+	if (props.host_caps.high_speed_support) caps |= GB_SDIO_CAP_SD_HS | GB_SDIO_CAP_MMC_HS;
+	if (props.host_caps.vol_330_support) caps |= GB_SDIO_CAP_HS200_1_2V; /* Partial mapping */
+
+	response->caps = sys_cpu_to_le32(caps);
+	response->ocr = sys_cpu_to_le32(0x00FF8000); /* Placeholder: 2.7-3.6V */
+	response->f_min = sys_cpu_to_le32(props.f_min);
+	response->f_max = sys_cpu_to_le32(props.f_max);
+	
+	/* Use calculated max values */
+	response->max_blk_count = sys_cpu_to_le16(max_data_size / 512); 
+	response->max_blk_size = sys_cpu_to_le16(512);
 
 	return GB_OP_SUCCESS;
 }
 
-/**
- * @brief Protocol set the SDIO host configuration.
- *
- * Set ios operation allows the request to setup parameters lo SDIO controller.
- *
- * @param operation - pointer to structure of Greybus operation message
- * @return GB_OP_SUCCESS on success, error code on failure.
- */
 static uint8_t gb_sdio_protocol_set_ios(struct gb_operation *operation)
 {
 	struct gb_sdio_set_ios_request *request;
 	struct gb_bundle *bundle;
-	struct sdio_ios ios;
+	struct gb_sdio_info *info;
+	struct sdhc_io ios = {0};
 	int ret;
 
 	bundle = gb_operation_get_bundle(operation);
-	DEBUGASSERT(bundle);
+	info = bundle->priv;
 
 	request = gb_operation_get_request_payload(operation);
 
@@ -215,14 +126,43 @@ static uint8_t gb_sdio_protocol_set_ios(struct gb_operation *operation)
 	}
 
 	ios.clock = sys_le32_to_cpu(request->clock);
-	ios.vdd = sys_le32_to_cpu(request->vdd);
-	ios.bus_mode = request->bus_mode;
-	ios.power_mode = request->power_mode;
-	ios.bus_width = request->bus_width;
-	ios.timing = request->timing;
-	ios.signal_voltage = request->signal_voltage;
-	ios.drv_type = request->drv_type;
-	ret = device_sdio_set_ios(bundle->dev, &ios);
+	
+	switch(request->bus_mode) {
+		case GB_SDIO_BUSMODE_OPENDRAIN: ios.bus_mode = SDHC_BUSMODE_OPENDRAIN; break;
+		case GB_SDIO_BUSMODE_PUSHPULL: ios.bus_mode = SDHC_BUSMODE_PUSHPULL; break;
+		default: ios.bus_mode = SDHC_BUSMODE_PUSHPULL;
+	}
+
+	switch(request->power_mode) {
+		case GB_SDIO_POWER_OFF: ios.power_mode = SDHC_POWER_OFF; break;
+		case GB_SDIO_POWER_UP: ios.power_mode = SDHC_POWER_ON; break;
+		case GB_SDIO_POWER_ON: ios.power_mode = SDHC_POWER_ON; break;
+		default: ios.power_mode = SDHC_POWER_OFF;
+	}
+
+	switch(request->bus_width) {
+		case GB_SDIO_BUS_WIDTH_1: ios.bus_width = SDHC_BUS_WIDTH1BIT; break;
+		case GB_SDIO_BUS_WIDTH_4: ios.bus_width = SDHC_BUS_WIDTH4BIT; break;
+		case GB_SDIO_BUS_WIDTH_8: ios.bus_width = SDHC_BUS_WIDTH8BIT; break;
+		default: ios.bus_width = SDHC_BUS_WIDTH1BIT;
+	}
+	
+	switch(request->timing) {
+		case GB_SDIO_TIMING_LEGACY: ios.timing = SDHC_TIMING_LEGACY; break;
+		case GB_SDIO_TIMING_SD_HS: ios.timing = SDHC_TIMING_HS; break;
+		case GB_SDIO_TIMING_MMC_HS: ios.timing = SDHC_TIMING_HS; break;
+		default: ios.timing = SDHC_TIMING_LEGACY;
+	}
+	
+	/* Voltage mapping approximated */
+	switch(request->signal_voltage) {
+		case GB_SDIO_SIGNAL_VOLTAGE_330: ios.signal_voltage = SD_VOL_3_3_V; break;
+		case GB_SDIO_SIGNAL_VOLTAGE_180: ios.signal_voltage = SD_VOL_1_8_V; break;
+		case GB_SDIO_SIGNAL_VOLTAGE_120: ios.signal_voltage = SD_VOL_1_2_V; break;
+		default: ios.signal_voltage = SD_VOL_3_3_V;
+	}
+
+	ret = sdhc_set_io(info->sdhc_dev, &ios);
 	if (ret) {
 		return gb_errno_to_op_result(ret);
 	}
@@ -230,25 +170,18 @@ static uint8_t gb_sdio_protocol_set_ios(struct gb_operation *operation)
 	return GB_OP_SUCCESS;
 }
 
-/**
- * @brief Protocol requests to send command.
- *
- * Sending a single command to the SD card through the SDIO host controller.
- *
- * @param operation - pointer to structure of Greybus operation message
- * @return GB_OP_SUCCESS on success, error code on failure.
- */
 static uint8_t gb_sdio_protocol_command(struct gb_operation *operation)
 {
 	struct gb_sdio_command_request *request;
 	struct gb_sdio_command_response *response;
 	struct gb_bundle *bundle;
-	struct sdio_cmd cmd;
-	uint32_t resp[4];
+	struct gb_sdio_info *info;
+	struct sdhc_command cmd = {0};
 	int i, ret;
+	uint16_t data_blocks;
 
 	bundle = gb_operation_get_bundle(operation);
-	DEBUGASSERT(bundle);
+	info = bundle->priv;
 
 	request = gb_operation_get_request_payload(operation);
 
@@ -257,23 +190,46 @@ static uint8_t gb_sdio_protocol_command(struct gb_operation *operation)
 		return GB_OP_INVALID;
 	}
 
-	cmd.cmd = request->cmd;
-	cmd.cmd_flags = request->cmd_flags;
-	cmd.cmd_type = request->cmd_type;
-	cmd.cmd_arg = sys_le32_to_cpu(request->cmd_arg);
-	cmd.data_blocks = sys_le16_to_cpu(request->data_blocks);
-	cmd.data_blksz = sys_le16_to_cpu(request->data_blksz);
-	cmd.resp = resp;
-	ret = device_sdio_send_cmd(bundle->dev, &cmd);
-	if (ret && ret != -ETIMEDOUT) {
-		/*
-		 * The Linux MMC core send pariticular command to indentify the card is
-		 * SDIO, MMC or SD card. The SD storage doesn't response the SDIO
-		 * command, then the host controller will generate timeout error, but
-		 * for us, we must keep the greybus continue to process the response
-		 * we send back to host AP, even it is zero. so we filter out the
-		 * timeout error.
-		 */
+	data_blocks = sys_le16_to_cpu(request->data_blocks);
+
+	cmd.opcode = request->cmd;
+	cmd.arg = sys_le32_to_cpu(request->cmd_arg);
+	
+	/* Map flags - simplified mapping */
+	if (request->cmd_flags & GB_SDIO_RSP_PRESENT) {
+		if (request->cmd_flags & GB_SDIO_RSP_136) {
+			cmd.response_type = SD_RSP_TYPE_R2;
+		} else if (request->cmd_flags & GB_SDIO_RSP_BUSY) {
+			cmd.response_type = SD_RSP_TYPE_R1b;
+		} else {
+			cmd.response_type = SD_RSP_TYPE_R1;
+		}
+	} else {
+		cmd.response_type = SD_RSP_TYPE_NONE;
+	}
+
+	if (data_blocks > 0) {
+		/* Defer execution */
+		info->deferred_cmd = cmd;
+		info->has_deferred_cmd = true;
+		
+		response = gb_operation_alloc_response(operation, sizeof(*response));
+		if (!response) {
+			return GB_OP_NO_MEMORY;
+		}
+		
+		/* Spoof Success Response for now */
+		memset(response->resp, 0, sizeof(response->resp));
+		/* R1 Ready for Data */
+		response->resp[0] = sys_cpu_to_le32(0x00000900); 
+
+		return GB_OP_SUCCESS;
+	}
+
+	/* Immediate Execution */
+	ret = sdhc_request(info->sdhc_dev, &cmd, NULL);
+	if (ret) {
+		LOG_ERR("sdhc_request failed: %d", ret);
 		return gb_errno_to_op_result(ret);
 	}
 
@@ -282,49 +238,26 @@ static uint8_t gb_sdio_protocol_command(struct gb_operation *operation)
 		return GB_OP_NO_MEMORY;
 	}
 
-	/*
-	 * Per the discussion for the order of bits in response with Linux MMC core,
-	 *
-	 * To return R1 and other 32 bits response, the format is,
-	 * resp[0] = Response bit 39 ~ 8
-	 *
-	 * Check bit 31 is "out of range", and bit 8 is "ready for data".
-	 *
-	 * For R2 and other 136 bits response,
-	 * resp[0] = Response bit 127 ~ 96
-	 * resp[1] = Response bit 95 ~ 64
-	 * resp[2] = Response bit 63 ~ 32
-	 * resp[3] = Response bit 31 ~ 1, bit 0 is reserved.
-	 *
-	 * The SD host controller spec has different definition for R2, the driver
-	 * must conver it to those bit position.
-	 */
 	for (i = 0; i < 4; i++) {
-		response->resp[i] = sys_cpu_to_le32(resp[i]);
+		response->resp[i] = sys_cpu_to_le32(cmd.response[i]);
 	}
 
 	return GB_OP_SUCCESS;
 }
 
-/**
- * @brief Protocol request to send and receive data.
- *
- * SDIO transfer operation allows the requester to send or receive data blocks
- * and shall be preceded by a Greybus Command Request for data transfer command
- *
- * @param operation The pointer to structure of Greybus operation.
- * @return GB_OP_SUCCESS on success, error code on failure.
- */
 static uint8_t gb_sdio_protocol_transfer(struct gb_operation *operation)
 {
 	struct gb_sdio_transfer_request *request;
 	struct gb_sdio_transfer_response *response;
 	struct gb_bundle *bundle;
-	struct sdio_transfer transfer;
+	struct gb_sdio_info *info;
+	struct sdhc_data data = {0};
 	int ret;
+	uint16_t blocks;
+	uint16_t blksz;
 
 	bundle = gb_operation_get_bundle(operation);
-	DEBUGASSERT(bundle);
+	info = bundle->priv;
 
 	request = gb_operation_get_request_payload(operation);
 
@@ -332,63 +265,80 @@ static uint8_t gb_sdio_protocol_transfer(struct gb_operation *operation)
 		LOG_ERR("dropping short message");
 		return GB_OP_INVALID;
 	}
+	
+	blocks = sys_le16_to_cpu(request->data_blocks);
+	blksz = sys_le16_to_cpu(request->data_blksz);
+	
+	if (!info->has_deferred_cmd) {
+		LOG_ERR("Transfer request without deferred command");
+		return GB_OP_INVALID;
+	}
 
-	transfer.blocks = sys_le16_to_cpu(request->data_blocks);
-	transfer.blksz = sys_le16_to_cpu(request->data_blksz);
-	transfer.dma = NULL;      /* NO DMA so far */
-	transfer.callback = NULL; /* NO non-blocking transfer */
+	data.block_size = blksz;
+	data.blocks = blocks;
 
 	if (request->data_flags & GB_SDIO_DATA_WRITE) {
 		if (!request->data) {
 			return GB_OP_INVALID;
 		}
-		transfer.data = request->data;
-		ret = device_sdio_write(bundle->dev, &transfer);
+		data.data = request->data;
+		data.bytes_transferred = 0;
+		
+		ret = sdhc_request(info->sdhc_dev, &info->deferred_cmd, &data);
 		if (ret) {
+			info->has_deferred_cmd = false;
 			return gb_errno_to_op_result(ret);
 		}
+		
 		response = gb_operation_alloc_response(operation, sizeof(*response));
 		if (!response) {
 			return GB_OP_NO_MEMORY;
 		}
-		response->data_blocks = sys_cpu_to_le16(transfer.blocks);
-		response->data_blksz = sys_cpu_to_le16(transfer.blksz);
+		response->data_blocks = sys_cpu_to_le16(blocks);
+		response->data_blksz = sys_cpu_to_le16(blksz);
+
 	} else if (request->data_flags & GB_SDIO_DATA_READ) {
 		response = gb_operation_alloc_response(
-			operation, sizeof(*response) + transfer.blocks * transfer.blksz);
+			operation, sizeof(*response) + blocks * blksz);
 		if (!response) {
 			return GB_OP_NO_MEMORY;
 		}
-		transfer.data = response->data;
-		ret = device_sdio_read(bundle->dev, &transfer);
+		data.data = response->data;
+		data.bytes_transferred = 0;
+		
+		ret = sdhc_request(info->sdhc_dev, &info->deferred_cmd, &data);
 		if (ret) {
+			info->has_deferred_cmd = false;
 			return gb_errno_to_op_result(ret);
 		}
-		response->data_blocks = sys_cpu_to_le16(transfer.blocks);
-		response->data_blksz = sys_cpu_to_le16(transfer.blksz);
+		
+		response->data_blocks = sys_cpu_to_le16(blocks);
+		response->data_blksz = sys_cpu_to_le16(blksz);
 	} else {
 		return GB_OP_INVALID;
 	}
-
+	
+	info->has_deferred_cmd = false;
 	return GB_OP_SUCCESS;
 }
 
-/**
- * @brief Greybus SDIO protocol initialize function
- *
- * This function performs the protocol initialization function, such as open
- * the cooperation device driver, attach callback, create buffers etc.
- *
- * @param cport CPort number.
- * @param bundle Greybus bundle handle
- * @return 0 on success, negative errno on error.
- */
 static int gb_sdio_init(unsigned int cport, struct gb_bundle *bundle)
 {
 	struct gb_sdio_info *info;
-	int ret;
+	const struct device *dev;
 
 	DEBUGASSERT(bundle);
+
+	dev = device_get_binding(CONFIG_GREYBUS_SDIO_CONTROLLER_NAME);
+	if (!dev) {
+		LOG_ERR("SDHC Device not found");
+		return -ENODEV;
+	}
+	
+	if (!device_is_ready(dev)) {
+		LOG_ERR("SDHC Device not ready");
+		return -ENODEV;
+	}
 
 	info = zalloc(sizeof(*info));
 	if (info == NULL) {
@@ -396,37 +346,14 @@ static int gb_sdio_init(unsigned int cport, struct gb_bundle *bundle)
 	}
 
 	info->cport = cport;
+	info->sdhc_dev = dev;
+	info->has_deferred_cmd = false;
 
-	bundle->dev = device_open(DEVICE_TYPE_SDIO_HW, 0);
-	if (!bundle->dev) {
-		ret = -ENODEV;
-		goto err_free_info;
-	}
-
-	ret = device_sdio_attach_callback(bundle->dev, event_callback, info);
-	if (ret) {
-		goto err_close_device;
-	}
+	bundle->priv = info;
 
 	return 0;
-
-err_close_device:
-	device_close(bundle->dev);
-err_free_info:
-	free(info);
-
-	return ret;
 }
 
-/**
- * @brief Protocol exit function.
- *
- * This function can be called when protocol terminated.
- *
- * @param cport CPort number.
- * @param bundle Greybus bundle handle
- * @return None.
- */
 static void gb_sdio_exit(unsigned int cport, struct gb_bundle *bundle)
 {
 	struct gb_sdio_info *info;
@@ -436,32 +363,25 @@ static void gb_sdio_exit(unsigned int cport, struct gb_bundle *bundle)
 
 	DEBUGASSERT(cport == info->cport);
 
-	device_sdio_attach_callback(bundle->dev, NULL, NULL);
-
-	device_close(bundle->dev);
-
 	free(info);
-	info = NULL;
+	bundle->priv = NULL;
 }
 
-/**
- * @brief Greybus SDIO protocol operation handler
- */
 static uint8_t gb_sdio_handler(uint8_t type, struct gb_operation *opr)
 {
 	switch (type) {
 	case GB_SDIO_TYPE_PROTOCOL_VERSION:
 		return gb_sdio_protocol_version(opr);
-	case GB_SDIO_TYPE_PROTOCOL_GET_CAPABILITIES:
+	case GB_SDIO_TYPE_GET_CAPABILITIES:
 		return gb_sdio_protocol_get_capabilities(opr);
-	case GB_SDIO_TYPE_PROTOCOL_SET_IOS:
+	case GB_SDIO_TYPE_SET_IOS:
 		return gb_sdio_protocol_set_ios(opr);
-	case GB_SDIO_TYPE_PROTOCOL_COMMAND:
+	case GB_SDIO_TYPE_COMMAND:
 		return gb_sdio_protocol_command(opr);
-	case GB_SDIO_TYPE_PROTOCOL_TRANSFER:
+	case GB_SDIO_TYPE_TRANSFER:
 		return gb_sdio_protocol_transfer(opr);
 	default:
-		LOG_ERR("Invalid type");
+		LOG_ERR("Invalid type: %u", type);
 		return GB_OP_INVALID;
 	}
 }
@@ -472,12 +392,6 @@ static struct gb_driver sdio_driver = {
 	.op_handler = gb_sdio_handler,
 };
 
-/**
- * @brief Register Greybus SDIO protocol
- *
- * @param cport cport number
- * @param bundle Bundle number.
- */
 void gb_sdio_register(int cport, int bundle)
 {
 	gb_register_driver(cport, bundle, &sdio_driver);

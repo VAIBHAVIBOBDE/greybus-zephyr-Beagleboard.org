@@ -2181,4 +2181,32 @@ struct gb_log_send_log_request {
 #define GB_VIBRATOR_TYPE_ON  0x02
 #define GB_VIBRATOR_TYPE_OFF 0x03
 
+/* USB */
+
+/* Greybus USB request types */
+#define GB_USB_TYPE_PROTOCOL_VERSION 0x01
+#define GB_USB_TYPE_HCD_STOP         0x02
+#define GB_USB_TYPE_HCD_START        0x03
+#define GB_USB_TYPE_HUB_CONTROL      0x04
+
+/* Greybus USB version */
+#define GB_USB_VERSION_MAJOR 0x00
+#define GB_USB_VERSION_MINOR 0x01
+
+struct gb_usb_proto_version_response {
+	__u8 major;
+	__u8 minor;
+} __packed;
+
+struct gb_usb_hub_control_request {
+	__le16 typeReq;
+	__le16 wValue;
+	__le16 wIndex;
+	__le16 wLength;
+} __packed;
+
+struct gb_usb_hub_control_response {
+	__u8 buf[0];
+} __packed;
+
 #endif /* __GREYBUS_PROTOCOLS_H */

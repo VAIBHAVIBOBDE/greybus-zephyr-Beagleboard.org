@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 Google Inc.
+ * Copyright (c) 2025 BeagleBoard.org
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,21 +27,20 @@
  * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  * Author: Fabien Parent <fparent@baylibre.com>
+ * Author: Ayush Singh <ayush@beagleboard.org>
  */
 
-#include <sys/byteorder.h>
-#include <greybus/greybus.h>
-#include <usb.h>
-#include "usb-gb.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
+#include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/usb/uhc.h>
+
+#include <greybus/greybus.h>
+#include <greybus/greybus_protocols.h>
+
 LOG_MODULE_REGISTER(greybus_usb, CONFIG_GREYBUS_LOG_LEVEL);
 
-static struct device *usbdev;
+static const struct device *usbdev;
 
 static uint8_t gb_usb_protocol_version(struct gb_operation *operation)
 {
@@ -58,21 +58,36 @@ static uint8_t gb_usb_protocol_version(struct gb_operation *operation)
 
 static uint8_t gb_usb_hcd_stop(struct gb_operation *operation)
 {
+	int ret;
+
 	LOG_DBG("%s()", __func__);
 
-	device_usb_hcd_stop(usbdev);
+	if (!usbdev) {
+		return GB_OP_UNKNOWN_ERROR;
+	}
+
+	ret = uhc_disable(usbdev);
+	if (ret < 0) {
+		LOG_ERR("Failed to stop HCD: %d", ret);
+		return GB_OP_UNKNOWN_ERROR;
+	}
 
 	return GB_OP_SUCCESS;
 }
 
 static uint8_t gb_usb_hcd_start(struct gb_operation *operation)
 {
-	int retval;
+	int ret;
 
 	LOG_DBG("%s()", __func__);
 
-	retval = device_usb_hcd_start(usbdev);
-	if (retval) {
+	if (!usbdev) {
+		return GB_OP_UNKNOWN_ERROR;
+	}
+
+	ret = uhc_enable(usbdev);
+	if (ret < 0) {
+		LOG_ERR("Failed to start HCD: %d", ret);
 		return GB_OP_UNKNOWN_ERROR;
 	}
 
@@ -83,31 +98,62 @@ static uint8_t gb_usb_hub_control(struct gb_operation *operation)
 {
 	struct gb_usb_hub_control_response *response;
 	struct gb_usb_hub_control_request *request = gb_operation_get_request_payload(operation);
-	uint16_t typeReq;
-	uint16_t wValue;
-	uint16_t wIndex;
+	struct usb_setup_packet setup;
 	uint16_t wLength;
-	int status;
+	int ret;
 
 	if (gb_operation_get_request_payload_size(operation) < sizeof(*request)) {
 		return GB_OP_INVALID;
 	}
 
-	typeReq = sys_le16_to_cpu(request->typeReq);
-	wValue = sys_le16_to_cpu(request->wValue);
-	wIndex = sys_le16_to_cpu(request->wIndex);
-	wLength = sys_le16_to_cpu(request->wLength);
+	setup.bmRequestType = (uint8_t)(sys_le16_to_cpu(request->typeReq) & 0xFF);
+	setup.bRequest = (uint8_t)(sys_le16_to_cpu(request->typeReq) >> 8);
+	setup.wValue = sys_le16_to_cpu(request->wValue);
+	setup.wIndex = sys_le16_to_cpu(request->wIndex);
+	setup.wLength = sys_le16_to_cpu(request->wLength);
+	
+	wLength = setup.wLength;
 
 	response = gb_operation_alloc_response(operation, sizeof(*response) + wLength);
 	if (!response) {
 		return GB_OP_NO_MEMORY;
 	}
 
-	LOG_DBG("%s(%hX, %hX, %hX, %hX)", __func__, typeReq, wValue, wIndex, wLength);
+	LOG_DBG("%s(Req: %x, Val: %x, Idx: %x, Len: %x)", __func__, setup.bRequest, setup.wValue, setup.wIndex, wLength);
 
-	status = device_usb_hcd_hub_control(usbdev, typeReq, wValue, wIndex, (char *)response->buf,
-					    wLength);
-	if (status) {
+	/* 
+	 * Note: Zephyr UHC API usually handles Root Hub control internally or 
+	 * doesn't expose a direct API to inject setup packets to the root hub 
+	 * from an external source purely via API.
+	 * However, many UHC logic implementations have a handling function.
+	 * For now, we will assume uhc_root_ctrl or similar is available or 
+	 * we might need to rely on a custom mapping.
+	 * 
+	 * IF `uhc_root_ctrl` is not available publically, this might fail to compile.
+	 * But we must try to hook it up.
+	 * 
+	 * Alternatively, we might need to handle this via `uhc_ep_enqueue` to control pipe?
+	 * DWC2/etc might behave differently.
+	 * 
+	 * Let's try `uhc_custom_request` or similar if it exists? No.
+	 * 
+	 * FIXME: If uhc_root_ctrl is not available, this needs to be adapted.
+	 */
+	
+	// ret = uhc_root_ctrl(usbdev, &setup, response->buf); 
+    // Commenting out the direct call to avoid compilation error if API doesn't exist
+    // and instead returning not supported until verified.
+    // Or better, let's just log and return SUCCESS for 0-length request to fake it?
+    
+    // For now, fail gently or pretend success if it's strictly required?
+    // The previous NuttX code did: device_usb_hcd_hub_control(...)
+    
+    // We will return an error to indicate it's not implemented yet, 
+    // unless we find the API.
+    LOG_WRN("hub_control not fully implemented for Zephyr UHC");
+    ret = -ENOTSUP;
+
+	if (ret) {
 		return GB_OP_UNKNOWN_ERROR;
 	}
 
@@ -116,8 +162,23 @@ static uint8_t gb_usb_hub_control(struct gb_operation *operation)
 
 static int gb_usb_init(unsigned int cport, struct gb_bundle *bundle)
 {
-	usbdev = device_open(DEVICE_TYPE_USB_HCD, 0);
-	if (!usbdev) {
+	/* 
+	 * Find the USB host controller.
+	 * This assumes a node label 'usb0' or similar exists and is enabled.
+	 * Ideally this should be configurable via Kconfig.
+	 */
+#if DT_NODE_EXISTS(DT_NODELABEL(usb0)) && DT_NODE_HAS_COMPAT(DT_NODELABEL(usb0), zephyr_uhc)
+	usbdev = DEVICE_DT_GET(DT_NODELABEL(usb0));
+#elif DT_HAS_CHOSEN(zephyr_usb_host)
+	usbdev = DEVICE_DT_GET(DT_CHOSEN(zephyr_usb_host));
+#else
+	/* Fallback or manual lookup needed */
+    // Try to find any device with UHC API?
+	usbdev = NULL; 
+#endif
+
+	if (!usbdev || !device_is_ready(usbdev)) {
+		LOG_ERR("USB Host Device not found or not ready");
 		return -ENODEV;
 	}
 
@@ -127,7 +188,7 @@ static int gb_usb_init(unsigned int cport, struct gb_bundle *bundle)
 static void gb_usb_exit(unsigned int cport, struct gb_bundle *bundle)
 {
 	if (usbdev) {
-		device_close(usbdev);
+	    uhc_disable(usbdev);
 	}
 }
 
@@ -143,12 +204,12 @@ static uint8_t gb_usb_handler(uint8_t type, struct gb_operation *opr)
 	case GB_USB_TYPE_HUB_CONTROL:
 		return gb_usb_hub_control(opr);
 	default:
-		LOG_ERR("Invalid type");
+		LOG_ERR("Invalid type: %u", type);
 		return GB_OP_INVALID;
 	}
 }
 
-struct gb_driver usb_driver = {
+static struct gb_driver usb_driver = {
 	.init = gb_usb_init,
 	.exit = gb_usb_exit,
 	.op_handler = gb_usb_handler,
@@ -158,3 +219,4 @@ void gb_usb_register(int cport, int bundle)
 {
 	gb_register_driver(cport, bundle, &usb_driver);
 }
+

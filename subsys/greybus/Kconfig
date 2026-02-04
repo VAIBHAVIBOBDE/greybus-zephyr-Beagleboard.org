@@ -199,6 +199,16 @@ config GREYBUS_HID
 	help
 	  Select this for Greybus HID support.
 
+if GREYBUS_HID
+
+config GREYBUS_HID_DEVICE_NAME
+	string "HID Device Name"
+	default "HID_0"
+	help
+	  The name of the HID device binding to use for Greybus HID.
+
+endif # GREYBUS_HID
+
 config GREYBUS_I2C
 	bool "Greybus I2C"
 	depends on I2C
@@ -253,6 +263,7 @@ config GREYBUS_UART
 
 config GREYBUS_USB
 	bool "Greybus USB"
+    depends on USB_HOST_STACK
 	help
 	  Select this for Greybus Universal Serial Bus support.
 
